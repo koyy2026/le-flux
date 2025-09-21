@@ -1,53 +1,69 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Header
 from pydantic import BaseModel
 from openai import OpenAI
-import os
+from enum import Enum
+from typing import Annotated # 引入 Annotated
 
-# 1. 初始化 FastAPI 應用
+# ... (AvailableModels Enum 保持不變) ...
+class AvailableModels(str, Enum):
+    schnell = "flux.1-schnell"
+    por = "flux.1.1-por"
+    latest = "flux.latest"
+    krea_dev = "flux.1-krea-dev"
+    kontext_pro = "flux.1-kontext-pro"
+    kontext_max = "flux.1-kontext-max"
+
+
 app = FastAPI(
-    title="FLUX.1 Image Generation API",
-    description="An API to generate images using FLUX.1 models, deployed on Leapcell.",
-    version="1.0.0"
+    title="User-Key AI Image Generation API",
+    description="API that uses the user's provided API key for image generation.",
+    version="2.0.0"
 )
 
-# 2. 初始化 OpenAI 客戶端以指向新的 API 提供商
-#    這裡以 apipie.ai 作為範例
-try:
-    # 我們仍然使用 OpenAI 的 Python 函式庫，但將 base_url 指向新的服務
-    client = OpenAI(
-        api_key=os.environ.get("sk-navy-cNgDa6klEXzaF7EDgmHR0AKitLPJCt2IZQBzxo_SbWY"), # 將環境變數名稱改為更通用的名稱
-        base_url="https://api.navy/v1"  # 更改為您的 API 提供商的 URL
-    )
-except Exception:
-    print("Error: FLUX_API_KEY environment variable not set.")
-    client = None
-
-# 3. 定義請求的資料模型
 class ImageRequest(BaseModel):
     prompt: str
-    model: str = "FLUX.1-schnell"  # 預設使用快速的 schnell 模型
+    model: AvailableModels = AvailableModels.schnell
     size: str = "1024x1024"
 
-# 4. 建立根端點 (/)
 @app.get("/")
 def read_root():
-    return {"status": "ok", "message": "Welcome to the FLUX.1 Image Generation API!"}
+    return {
+        "status": "ok",
+        "available_models": [model.value for model in AvailableModels]
+    }
 
-# 5. 建立圖像生成端點 (/generate-image)
-@app.post("/generate-image")
-async def generate_image(request: ImageRequest):
-    if not client:
-        return {"error": "API client is not configured. Check API key."}
+# --- 主要修改點 ---
+@app.post("/generate-image-with-user-key")
+async def generate_image(
+    request: ImageRequest,
+    # 從 Authorization 標頭中讀取 Bearer Token
+    authorization: Annotated[str | None, Header()] = None
+):
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing or invalid Authorization header. Please provide an API key as a Bearer token.")
+    
+    # 提取 API 金鑰
+    user_api_key = authorization.split("Bearer ")[1]
 
     try:
-        # API 呼叫的結構與 OpenAI 的 images.generate 完全相同
+        # 使用使用者提供的金鑰初始化客戶端
+        client = OpenAI(
+            api_key=user_api_key,
+            base_url="https://api.apipie.ai/v1"  # 範例 URL
+        )
+
         response = client.images.generate(
-            model=request.model,      # 讓使用者可以選擇 dev 或 schnell
+            model=request.model.value,
             prompt=request.prompt,
             size=request.size,
             n=1,
         )
         image_url = response.data[0].url
-        return {"prompt": request.prompt, "model": request.model, "image_url": image_url}
+        return {"prompt": request.prompt, "model": request.model.value, "image_url": image_url}
     except Exception as e:
-        return {"error": f"An error occurred while generating the image: {e}"}
+        # 這裡可以更細緻地處理 API 金鑰無效的錯誤
+        if "authentication" in str(e).lower():
+             raise HTTPException(status_code=403, detail=f"Authentication failed. Please check if your API key is correct and has enough credits. Error: {e}")
+        raise HTTPException(status_code=503, detail=f"An error occurred while communicating with the image generation service: {e}")
+
+
